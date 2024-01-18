@@ -1,0 +1,30 @@
+pipeline {
+    agent any
+
+    stages {
+        // Your build stages go here
+        stage('Build') {
+            steps {
+                // Build your project here
+            }
+        }
+    }
+
+    post {
+        always {
+            // Archive HTML reports
+            archiveArtifacts 'path/to/your/report.html' // Modify the path accordingly
+
+            // Publish HTML reports
+            publishHTML([
+                allowMissing: false,
+                alwaysLinkToLastBuild: false,
+                keepAll: true,
+                reportDir: 'path/to/your',
+                reportFiles: 'report.html', // Modify the file name accordingly
+                reportName: 'HTML Report',
+                reportTitles: 'My Custom Report'
+            ])
+        }
+    }
+}
