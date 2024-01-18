@@ -1,0 +1,38 @@
+pipeline {
+    agent any
+
+    stages {
+        stage('Set Build Display Name') {
+            steps {
+                script {
+                    currentBuild.displayName = "node-App: " + currentBuild.number
+                }
+            }
+        }
+
+        stage('Move To agentTwo') {
+            steps {
+                script {
+                    sshagent(['agentOne']) {
+                        sh "scp -o StrictHostKeyChecking=no Dockerfile root@192.168.17.223:/root/"
+                    }
+                    echo 'Deploying...'
+                }
+            }
+        }
+
+        
+        stage('Build Docker Image') {
+            steps {
+                sh "docker build . -t mydockerimage"
+            }
+        }
+
+        stage('Spin Container') {
+            steps {
+                sh "docker run -itd -p 6666:8080 --name nodeapp mydockerimage"
+            }
+        }
+        
+    }
+}
