@@ -1,0 +1,170 @@
+import groovy.json.JsonSlurper
+
+library 'jenkins_shared_libraries@1.0.11'
+
+properties([
+    parameters([
+        string(name: 'IMSBUILD', description: 'IMSBUILD number'),
+        string(name: 'IMS_BRANCH', description: 'IMS_BRANCH number', defaultValue: "7_6_0-LINA"),
+        string(name: 'TAGNAME', description: 'IMSBUILD tag'),
+        booleanParam(name: 'BQT', description: 'Enable/Disable BQT'),
+        booleanParam(name: 'BAT', description: 'Enable/Disable BAT'),
+        booleanParam(name: 'STS', description: 'Enable/Disable STS'),
+        booleanParam(name: 'SRTS', description: 'Enable/Disable SRTS'),
+        string(name: 'RECIPIENT', defaultValue: 'ankushk2@cisco.com', description: 'Recipient of any email notifications'),
+        string(name: 'SENDER', defaultValue: 'ankushk2@cisco.com', description: 'Sender of any email notifications'),
+        string(name: 'EMAIL', description: 'If there is a failure send an email to this address', defaultValue: "ankushk2@cisco.com"),
+        string(name: 'ASAPROJECT', description: 'Specify the asa project for pointer update', defaultValue: "zambia"),
+        string(name: 'REMOTE_JENKINS_URL', description: 'Specify the name of a remote jenkins server', defaultValue: "https://firepower-build.service.ntd.ciscolabs.com"),
+        string(name: 'UPSTREAM_STATUS', description: 'The status of the upstream job that started this one.', defaultValue: "SUCCESS"),
+    ]),
+    buildDiscarder(logRotator(numToKeepStr:'50',daysToKeepStr: '7',artifactDaysToKeepStr: '7',artifactNumToKeepStr: '50'))
+])
+
+def REMOTE_JOB_TOKEN = "NotARefrigerator"
+def REMOTE_AUTH = "firepower-build-token"
+
+def imsBuild = "${params.IMSBUILD}"
+
+def ignoreList = ["${JOB_NAME.tokenize("/").last()}", "cim_trigger"]
+def parallelJobs = [:]
+def buildResults = [:]
+
+timestamps {
+    node ('ful-jenkins-slave1.cisco.com') {
+        try {
+            stage ('Local Pointer Update') {
+                sh """ 
+                echo $IMSBUILD > ../sit_build.txt
+                cat ../sit_build.txt
+                """
+            }
+            
+            stage("Build test_job_one") {
+                try {
+                    def buildResult = build(job: 'test_job_one', propagate: false, wait: true)
+                    buildResults['test_job_one'] = buildResult.result
+                    if (buildResult.result != 'SUCCESS') {
+                        error "Downstream job test_job_one failed"
+                    }
+                } catch (Exception e) {
+                    buildResults['test_job_one'] = 'FAILURE'
+                    error "Error while triggering or waiting for downstream job test_job_one: ${e.message}"
+                }
+            }
+        } catch (e) {
+            // Throw the exception
+            throw e
+        } finally {
+            deleteDir()
+        }
+    }
+}
+
+def getJobStatus(jobName) {
+    def job_url = jobName.replace("/", "/job/")
+    def json = sh(script: "curl ${REMOTE_JENKINS_URL}/job/${job_url}/lastBuild/api/json", returnStdout: true)
+    def result = json.split("\"result\":\"")[1].split("\",")[0] 
+    return result
+}
+
+// Triggers an email depending on the status of the build
+def notifyBuildStatus(buildStatus) {
+    def details = ""
+    def mailSubject = ""
+    if (buildStatus == "SUCCESS") {
+        // Body of the mail for green build
+        details = """<STYLE>BODY,P { font-family:Verdana,Helvetica,sans serif; font-size:11px; color:black;}h1 { color:black; }h2 { color:black; }h3 { color:black; }</STYLE>
+                     <BODY>
+                     <B style="font-size: 250%;"> <IMG SRC="${REMOTE_JENKINS_URL}/static/e59dfe28/images/32x32/blue.gif"/>BUILD SUCCESSFUL</B>
+                     <p style="font-size: 120%;">Successful: Job ${env.JOB_NAME} [${BUILD_NUMBER}]</p>
+                     <p style="font-size: 120%;">Build: ${BUILD_NUMBER}</p>
+                     <p style="font-size: 120%;">Host: ${NODE_NAME}</p>
+                     <p style="font-size: 120%;">Build URL: ${env.BUILD_URL}</p>
+                     <p style="font-size: 120%;">Check console output at: &quot;<a href='${env.BUILD_URL}/console'>${env.JOB_NAME} [${env.BUILD_NUMBER}]</a>&quot;</p>
+                    </BODY>"""
+        mailSubject = "${env.JOB_NAME} build job SUCCESSFUL."
+    } else {
+        // Body of the mail for red buildStatus
+        details = """<STYLE>BODY,P { font-family:Verdana,Helvetica,sans serif; font-size:11px; color:black;}h1 { color:black; }h2 { color:black; }h3 { color:black; }</STYLE>
+                      <BODY>
+                      <B style="font-size: 250%;"> <IMG SRC="${REMOTE_JENKINS_URL}/static/e59dfe28/images/32x32/red.gif"/>BUILD FAILED</B>
+                      <p style="font-size: 120%;">Failed: Job ${env.JOB_NAME} [${BUILD_NUMBER}]</p>
+                      <p style="font-size: 120%;">Build: ${BUILD_NUMBER}</p>
+                      <p style="font-size: 120%;">Host: ${NODE_NAME}</p>
+                      <p style="font-size: 120%;">Build URL: ${env.BUILD_URL}</p>
+                      <p style="font-size: 120%;">Check console output at: &quot;<a href='${env.BUILD_URL}/console'>${env.JOB_NAME} [${env.BUILD_NUMBER}]</a>&quot;</p>
+                      </BODY>"""
+        mailSubject = "${env.JOB_NAME} build job FAILED!"
+    }
+    try {
+        emailext subject: mailSubject,
+            body: details,
+            mimeType: 'text/html',
+            to: "${params.RECIPIENT},sowmnaga@cisco.com,alnatara@cisco.com,susboppa@cisco.com,lfenu@cisco.com",
+            replyTo: params.RECIPIENT,
+            from: params.SENDER
+    } catch (e) {
+        log.error("Unable to send email!")
+        exceptionDetails(e)
+    }
+}
+
+// Gets all Jobs (not subfolders) in a folder
+def getAllJobs(url) {
+    def jobs = []
+    // Get job list from API
+    def json = sh(script: "curl -g ${url}/api/json?tree=jobs[name,url,color]", returnStdout: true).split("jobs\":")[1].replace("[", "").replace("]}", "")
+    
+    // Process json entries one by one
+    for (str in json.split("},")) {
+        def entry = "" + str + "}"
+        def job = readJSON text: entry.trim()
+        // echo "Class: " + job._class + ", Name: " + job.name
+        // Ignore folders
+        if (!job._class.contains("Folder")) {
+            // Ignore jobs in the ignore list
+            def ignore = false
+            for (i in ignoreList) {
+                if (i == job.name) {
+                    ignore = true
+                    break
+                }
+            }
+            if (!ignore && !job.color.contains("disabled")) {
+                jobs.add(job)
+            }
+        }
+    }
+    return jobs
+}
+
+// Get current ASA Version which need to be updated 
+def getASAVersion() {
+    try {
+        def json = sh(script: "curl -g https://raum.cisco.com:8089/json/cp/${params.IMS_BRANCH}/0/now", returnStdout: true)
+    
+        def parser = new JsonSlurper()
+        def new_json = parser.parseText(json)
+    
+        println("Current ASA version ->")
+        println(new_json[2][1].split(" ")[0])
+        return new_json[2][1].split(" ")[0]
+    } catch (e) {
+        echo "Error Retrieving ASA Version!"
+        return "Error"
+    }
+}
+
+// Check if any of the build results failed. Returns true if a failure is found.
+def checkForFailure() {
+    def failure = false
+    for (def key in buildResults.keySet()) {
+        echo "Job: ${key}: ${buildResults[key]}"
+        if (buildResults[key] == 'FAILURE') {
+            failure = true
+            break
+        }
+    }
+    return failure
+}
